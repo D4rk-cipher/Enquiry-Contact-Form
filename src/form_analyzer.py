@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from playwright.async_api import Locator, Page
+from playwright.async_api import Frame, Locator, Page
 
 
 @dataclass
@@ -67,7 +67,7 @@ def _score_field(signals: str, field_type: str) -> float:
     return score
 
 
-async def find_form_fields(page: Page) -> dict[str, FieldMatch]:
+async def find_form_fields(page: Page | Frame) -> dict[str, FieldMatch]:
     candidates: dict[str, list[FieldMatch]] = {k: [] for k in FIELD_KEYWORDS}
 
     inputs = page.locator("form input, form textarea, form select, input, textarea, select")
