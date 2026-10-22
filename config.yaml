@@ -14,7 +14,7 @@ profile:
   website: "https://yourcompany.com"
   job_title: ""                  # optional
 
-# Default message (used if no industry template matches)
+# Default message (fallback if no template selected)
 default_message: |
   Hi,
 
@@ -26,28 +26,8 @@ default_message: |
   John Doe
   Your Company Name
 
-# Optional industry-specific message templates
-# Key = industry tag you can pass via CLI or add later
-message_templates:
-  real_estate: |
-    Hi,
-
-    I help real estate businesses generate more qualified leads through targeted outreach and digital channels.
-
-    Would you be open to a quick chat about how this could work for your agency?
-
-    Best regards,
-    John Doe
-
-  general: |
-    Hi,
-
-    I noticed your company and thought there might be a good fit for what we offer.
-
-    Happy to share more details if you're interested.
-
-    Best regards,
-    John Doe
+# Prefer file-based templates in data/templates/*.txt
+# (real_estate, investments, equity, general, etc.)
 
 # Browser & runtime settings
 settings:
@@ -55,8 +35,7 @@ settings:
   timeout_ms: 30000              # page load / action timeout
   delay_between_domains_sec: 10  # base delay (jitter added automatically)
   max_retries_per_domain: 1
-  screenshot_on_every_attempt: true
-  screenshot_on_failure_only: false
+  screenshot_on_success_only: true   # only screenshot when filled/submitted
   user_agent: null               # null = Playwright default; or set a realistic one
 
 # Common contact page paths to try (in order)
