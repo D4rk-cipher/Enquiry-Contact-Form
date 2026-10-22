@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
-from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
+from playwright.async_api import Page
+
+
+@dataclass
+class FindResult:
+    status: str  # "found" | "no_form" | "inaccessible"
+    url: str | None = None
+    notes: str = ""
 
 
 async def try_url(page: Page, url: str, timeout: int = 15_000) -> bool:
@@ -31,7 +38,9 @@ async def page_looks_like_contact(page: Page, keywords: list[str]) -> bool:
             if kw.lower() in text:
                 return True
         if await page.locator("input[type='email'], input[name*='email' i]").count() > 0:
-            if await page.locator("textarea, input[name*='message' i], input[name*='comment' i]").count() > 0:
+            if await page.locator(
+                "textarea, input[name*='message' i], input[name*='comment' i]"
+            ).count() > 0:
                 return True
     except Exception:
         return False
@@ -44,31 +53,41 @@ async def find_contact_page(
     contact_paths: list[str],
     contact_keywords: list[str],
     timeout_ms: int = 20_000,
-) -> str | None:
+) -> FindResult:
     """
-    Returns the URL of a likely contact page, or None.
-    Tries common paths first, then homepage + nav links.
+    Returns FindResult with status:
+      - found: contact page located
+      - inaccessible: homepage could not be reached at all
+      - no_form: site reachable but no contact form found
     """
-    base = f"https://{domain}"
+    https_base = f"https://{domain}"
+    http_base = f"http://{domain}"
 
-    # 1. Common paths
+    homepage_ok = await try_url(page, https_base, timeout=timeout_ms)
+    base = https_base
+    if not homepage_ok:
+        homepage_ok = await try_url(page, http_base, timeout=timeout_ms)
+        base = http_base
+
+    if not homepage_ok:
+        return FindResult(
+            status="inaccessible",
+            notes="homepage_unreachable",
+        )
+
+    if await page_looks_like_contact(page, contact_keywords):
+        return FindResult(status="found", url=page.url)
+
     for path in contact_paths:
         url = urljoin(base, path)
         if await try_url(page, url, timeout=timeout_ms):
             if await page_looks_like_contact(page, contact_keywords):
-                return page.url
+                return FindResult(status="found", url=page.url)
 
-    # 2. Homepage
-    if not await try_url(page, base, timeout=timeout_ms):
-        base = f"http://{domain}"
-        if not await try_url(page, base, timeout=timeout_ms):
-            return None
-
-    if await page_looks_like_contact(page, contact_keywords):
-        return page.url
-
-    # 3. Scan nav / footer links
     try:
+        if page.url.rstrip("/") not in (https_base, http_base):
+            await try_url(page, base, timeout=timeout_ms)
+
         links = await page.locator("a[href]").all()
         candidates: list[str] = []
         for link in links[:80]:
@@ -88,14 +107,15 @@ async def find_contact_page(
             except Exception:
                 continue
 
-        seen = set()
+        seen: set[str] = set()
         for cand in candidates:
-            if cand not in seen:
-                seen.add(cand)
-                if await try_url(page, cand, timeout=timeout_ms):
-                    if await page_looks_like_contact(page, contact_keywords):
-                        return page.url
+            if cand in seen:
+                continue
+            seen.add(cand)
+            if await try_url(page, cand, timeout=timeout_ms):
+                if await page_looks_like_contact(page, contact_keywords):
+                    return FindResult(status="found", url=page.url)
     except Exception:
         pass
 
-    return None
+    return FindResult(status="no_form", notes="contact_page_not_found")
