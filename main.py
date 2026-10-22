@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Contact Form Bot - Phase 1
-Usage examples:
-  python main.py --input data/emails.csv --mode test
-  python main.py --input data/emails.csv --mode submit --resume
-  python main.py --input data/emails.csv --mode test --industry real_estate --limit 20
+Enquiry Contact Form Bot - Phase 1
+
+Default: interactive menu
+CLI still available for automation.
 """
 
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from rich.prompt import Prompt, Confirm
+from rich.table import Table
 
-from src.config import load_config, get_message, get_profile
+from src.config import load_config, get_message, get_profile, list_templates
 from src.domain_extractor import load_domains_from_csv
 from src.browser import get_browser, new_page
 from src.page_finder import find_contact_page
@@ -26,7 +30,7 @@ from src.captcha_detector import page_has_captcha
 from src.logger import RunLogger
 from src.utils import polite_delay
 
-app = typer.Typer(add_completion=False, help="Contact Form Outreach Bot - Phase 1")
+app = typer.Typer(add_completion=False, help="Enquiry Contact Form Bot - Phase 1")
 console = Console()
 
 
@@ -35,17 +39,17 @@ async def process_domain(
     original_email: str,
     config: dict,
     mode: str,
-    industry: str | None,
+    template_name: str | None,
     logger: RunLogger,
     context,
 ) -> str:
-    """Process a single domain. Returns final status."""
     settings = config["settings"]
     profile = get_profile(config)
-    message = get_message(config, industry)
+    message = get_message(config, template_name)
     contact_paths = config["contact_paths"]
     keywords = config["contact_keywords"]
     timeout = int(settings.get("timeout_ms", 30_000))
+    success_only = bool(settings.get("screenshot_on_success_only", True))
 
     page = await new_page(context)
     contact_url = ""
@@ -54,13 +58,21 @@ async def process_domain(
     screenshot_path = ""
 
     try:
-        contact_url = await find_contact_page(
+        result = await find_contact_page(
             page, domain, contact_paths, keywords, timeout_ms=timeout
         )
-        if not contact_url:
-            status = "no_form"
-            notes = "contact_page_not_found"
+
+        if result.status == "inaccessible":
+            status = "inaccessible"
+            notes = result.notes or "homepage_unreachable"
             return status
+
+        if result.status == "no_form":
+            status = "no_form"
+            notes = result.notes or "contact_page_not_found"
+            return status
+
+        contact_url = result.url or page.url
 
         if await page_has_captcha(page):
             status = "captcha"
@@ -95,16 +107,20 @@ async def process_domain(
         notes = f"{type(e).__name__}: {str(e)[:120]}"
         return status
     finally:
-        try:
-            if settings.get("screenshot_on_every_attempt") or (
-                settings.get("screenshot_on_failure_only")
-                and status not in ("submitted", "filled_only")
-            ):
+        take_shot = False
+        if success_only:
+            if status in ("submitted", "filled_only"):
+                take_shot = True
+        else:
+            take_shot = True
+
+        if take_shot:
+            try:
                 shot = logger.screenshot_path_for(domain, status)
                 await page.screenshot(path=str(shot), full_page=True)
                 screenshot_path = str(shot)
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         logger.log_result(
             domain=domain,
@@ -124,7 +140,7 @@ async def run_bot(
     input_path: Path,
     mode: str,
     config_path: Path,
-    industry: Optional[str],
+    template_name: Optional[str],
     resume: bool,
     limit: Optional[int],
     email_column: Optional[str],
@@ -154,8 +170,8 @@ async def run_bot(
         console.print("[yellow]Nothing to process.[/yellow]")
         return
 
-    console.print(f"Mode: [bold cyan]{mode}[/bold cyan] | Delay ~ {delay}s between domains")
-    console.print(f"Profile email: {config['profile'].get('email')}")
+    console.print(f"Mode: [bold cyan]{mode}[/bold cyan] | Template: [cyan]{template_name or 'default'}[/cyan]")
+    console.print(f"Delay ~ {delay}s | Profile email: {config['profile'].get('email')}")
     console.print()
 
     async with get_browser(settings) as context:
@@ -171,16 +187,17 @@ async def run_bot(
             for idx, (domain, email) in enumerate(pairs, 1):
                 progress.update(task, description=f"[cyan]{domain}[/cyan]")
                 status = await process_domain(
-                    domain, email, config, mode, industry, logger, context
+                    domain, email, config, mode, template_name, logger, context
                 )
                 color = {
                     "submitted": "green",
                     "filled_only": "blue",
                     "captcha": "yellow",
                     "no_form": "magenta",
+                    "inaccessible": "red",
                     "error": "red",
                 }.get(status, "white")
-                console.print(f"  [{color}]{status:12}[/{color}] {domain}")
+                console.print(f"  [{color}]{status:14}[/{color}] {domain}")
 
                 progress.advance(task)
 
@@ -193,17 +210,107 @@ async def run_bot(
     console.print("Progress saved -> output/progress.json")
 
 
+def interactive_menu() -> None:
+    console.print(
+        Panel.fit(
+            "[bold cyan]Enquiry Contact Form Bot[/bold cyan]\nPhase 1",
+            border_style="cyan",
+        )
+    )
+
+    default_csv = Path("data/emails.csv")
+    csv_path_str = Prompt.ask(
+        "Path to email CSV",
+        default=str(default_csv) if default_csv.exists() else "data/emails.csv",
+    )
+    csv_path = Path(csv_path_str)
+    if not csv_path.exists():
+        console.print(f"[red]File not found: {csv_path}[/red]")
+        raise typer.Exit(1)
+
+    templates = list_templates("data/templates")
+    template_name: str | None = None
+
+    if templates:
+        table = Table(title="Available message templates", show_header=True)
+        table.add_column("#", style="cyan", width=4)
+        table.add_column("Template")
+        for i, name in enumerate(templates, 1):
+            table.add_row(str(i), name)
+        console.print(table)
+
+        choice = Prompt.ask(
+            "Select template number (or press Enter for first)",
+            default="1",
+        )
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(templates):
+                template_name = templates[idx]
+        except ValueError:
+            if choice in templates:
+                template_name = choice
+            else:
+                template_name = templates[0] if templates else None
+    else:
+        console.print("[yellow]No templates found in data/templates/ - using config default[/yellow]")
+
+    mode_choice = Prompt.ask(
+        "Mode",
+        choices=["test", "submit"],
+        default="test",
+    )
+
+    resume = Confirm.ask("Resume previous run (skip already processed)?", default=True)
+    limit_str = Prompt.ask("Limit to first N domains (Enter = all)", default="")
+    limit = int(limit_str) if limit_str.strip().isdigit() else None
+
+    console.print()
+    console.print(
+        f"[bold]Ready:[/bold] CSV={csv_path} | Template={template_name or 'default'} | Mode={mode_choice}"
+    )
+    if not Confirm.ask("Start now?", default=True):
+        console.print("Cancelled.")
+        raise typer.Exit(0)
+
+    asyncio.run(
+        run_bot(
+            input_path=csv_path,
+            mode=mode_choice,
+            config_path=Path("config.yaml"),
+            template_name=template_name,
+            resume=resume,
+            limit=limit,
+            email_column=None,
+        )
+    )
+
+
 @app.command()
 def main(
-    input: Path = typer.Option(..., "--input", "-i", help="CSV file with emails"),
+    input: Optional[Path] = typer.Option(
+        None, "--input", "-i", help="CSV file with emails (omit for interactive menu)"
+    ),
     mode: str = typer.Option("test", "--mode", "-m", help="test | submit"),
-    config: Path = typer.Option("config.yaml", "--config", "-c", help="Path to config.yaml"),
-    industry: Optional[str] = typer.Option(None, "--industry", help="Message template key"),
-    resume: bool = typer.Option(False, "--resume", help="Skip already processed domains"),
-    limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Process only first N domains"),
-    email_column: Optional[str] = typer.Option(None, "--email-column", help="Name of email column in CSV"),
+    config: Path = typer.Option("config.yaml", "--config", "-c"),
+    template: Optional[str] = typer.Option(
+        None, "--template", "-t", help="Template name from data/templates/"
+    ),
+    industry: Optional[str] = typer.Option(
+        None, "--industry", help="Alias for --template (legacy)"
+    ),
+    resume: bool = typer.Option(False, "--resume"),
+    limit: Optional[int] = typer.Option(None, "--limit", "-l"),
+    email_column: Optional[str] = typer.Option(None, "--email-column"),
+    menu: bool = typer.Option(False, "--menu", help="Force interactive menu"),
 ):
-    """Contact Form Bot - Phase 1 (heuristics + Playwright)."""
+    """Enquiry Contact Form Bot. Run with no arguments for the interactive menu."""
+    template_name = template or industry
+
+    if input is None or menu:
+        interactive_menu()
+        return
+
     if mode not in ("test", "submit"):
         console.print("[red]mode must be 'test' or 'submit'[/red]")
         raise typer.Exit(1)
@@ -216,7 +323,7 @@ def main(
             input_path=input,
             mode=mode,
             config_path=config,
-            industry=industry,
+            template_name=template_name,
             resume=resume,
             limit=limit,
             email_column=email_column,
@@ -225,4 +332,7 @@ def main(
 
 
 if __name__ == "__main__":
-    app()
+    if len(sys.argv) == 1:
+        interactive_menu()
+    else:
+        app()
