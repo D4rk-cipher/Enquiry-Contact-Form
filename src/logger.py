@@ -17,6 +17,7 @@ class RunLogger:
 
         self.results_path = self.output_dir / "results.csv"
         self.captcha_path = self.output_dir / "needs_captcha.csv"
+        self.inaccessible_path = self.output_dir / "inaccessible.csv"
         self.progress_path = self.output_dir / "progress.json"
 
         self._init_csv(self.results_path, [
@@ -24,6 +25,9 @@ class RunLogger:
             "status", "notes", "screenshot_path"
         ])
         self._init_csv(self.captcha_path, [
+            "timestamp", "domain", "original_email", "contact_url", "notes"
+        ])
+        self._init_csv(self.inaccessible_path, [
             "timestamp", "domain", "original_email", "contact_url", "notes"
         ])
 
@@ -78,6 +82,11 @@ class RunLogger:
 
         if status == "captcha":
             with self.captcha_path.open("a", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([ts, domain, original_email, contact_url, notes])
+
+        if status == "inaccessible":
+            with self.inaccessible_path.open("a", encoding="utf-8", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow([ts, domain, original_email, contact_url, notes])
 
