@@ -1,14 +1,17 @@
-"""Small helpers."""
+"""Shared small utilities."""
 
 from __future__ import annotations
 
 import asyncio
 import random
-from typing import Any
 
 
-async def polite_delay(base_sec: float, jitter: float = 0.4) -> None:
-    """Sleep base_sec +/- jitter fraction."""
-    delay = base_sec * (1.0 + random.uniform(-jitter, jitter))
+async def polite_delay(min_s: float = 8.0, max_s: float = 15.0) -> None:
+    """Random sleep between min and max seconds."""
+    delay = random.uniform(min_s, max_s)
     delay = max(3.0, delay)
     await asyncio.sleep(delay)
+
+
+async def short_pause(min_ms: int = 200, max_ms: int = 600) -> None:
+    await asyncio.sleep(random.uniform(min_ms, max_ms) / 1000.0)
