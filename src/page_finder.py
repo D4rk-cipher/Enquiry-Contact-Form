@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
-from playwright.async_api import Page
-import asyncio
+from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
 
 
 @dataclass
@@ -16,19 +16,39 @@ class FindResult:
     notes: str = ""
 
 
-async def try_url(page: Page, url: str, timeout: int = 15_000) -> bool:
+NAV_TIMEOUT_MS = 12_000
+MAX_CONTACT_PATHS = 8
+MAX_LINK_CANDIDATES = 6
+
+
+async def try_url(page: Page, url: str, timeout: int = NAV_TIMEOUT_MS) -> bool:
+    """Always returns within ~timeout ms. Stops hung navigations."""
+    timeout = min(timeout, NAV_TIMEOUT_MS)
     try:
-        resp = await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+        resp = await page.goto(url, wait_until="commit", timeout=timeout)
         if resp and resp.status >= 400:
             return False
-        await asyncio.sleep(0.8)
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=min(4000, timeout))
+        except Exception:
+            pass
+        await asyncio.sleep(0.4)
         return True
+    except PlaywrightTimeout:
+        try:
+            await page.evaluate("window.stop()")
+        except Exception:
+            pass
+        return False
     except Exception:
+        try:
+            await page.evaluate("window.stop()")
+        except Exception:
+            pass
         return False
 
 
 async def page_looks_like_contact(page: Page, keywords: list[str]) -> bool:
-    """Stricter: real contact form prefers email + (message OR phone)."""
     try:
         has_real = await page.evaluate(
             """() => {
@@ -80,8 +100,9 @@ async def find_contact_page(
     domain: str,
     contact_paths: list[str],
     contact_keywords: list[str],
-    timeout_ms: int = 20_000,
+    timeout_ms: int = NAV_TIMEOUT_MS,
 ) -> FindResult:
+    timeout_ms = min(int(timeout_ms), NAV_TIMEOUT_MS)
     https_base = f"https://{domain}"
     http_base = f"http://{domain}"
 
@@ -97,7 +118,7 @@ async def find_contact_page(
     if await page_looks_like_contact(page, contact_keywords):
         return FindResult(status="found", url=page.url)
 
-    for path in contact_paths:
+    for path in contact_paths[:MAX_CONTACT_PATHS]:
         url = urljoin(base, path)
         if await try_url(page, url, timeout=timeout_ms):
             if await page_looks_like_contact(page, contact_keywords):
@@ -109,7 +130,7 @@ async def find_contact_page(
 
         links = await page.locator("a[href]").all()
         candidates: list[str] = []
-        for link in links[:80]:
+        for link in links[:50]:
             try:
                 href = await link.get_attribute("href")
                 text = (await link.inner_text()).lower().strip()
@@ -127,10 +148,14 @@ async def find_contact_page(
                 continue
 
         seen: set[str] = set()
+        tried = 0
         for cand in candidates:
             if cand in seen:
                 continue
             seen.add(cand)
+            tried += 1
+            if tried > MAX_LINK_CANDIDATES:
+                break
             if await try_url(page, cand, timeout=timeout_ms):
                 if await page_looks_like_contact(page, contact_keywords):
                     return FindResult(status="found", url=page.url)
