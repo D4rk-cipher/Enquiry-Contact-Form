@@ -1,0 +1,88 @@
+# ============================================================
+# Contact Form Bot - Configuration
+# Edit this file with your details before running
+# ============================================================
+
+# Your personal / company profile (used to fill forms)
+profile:
+  first_name: "John"
+  last_name: "Doe"
+  full_name: "John Doe"          # used when form has a single Name field
+  email: "john.doe@yourcompany.com"
+  phone: "+1 555 123 4567"
+  company: "Your Company Name"
+  website: "https://yourcompany.com"
+  job_title: ""                  # optional
+
+# Default message (used if no industry template matches)
+default_message: |
+  Hi,
+
+  I came across your website and wanted to reach out regarding a potential collaboration / service that may be useful for your business.
+
+  Would you be open to a short conversation?
+
+  Best regards,
+  John Doe
+  Your Company Name
+
+# Optional industry-specific message templates
+# Key = industry tag you can pass via CLI or add later
+message_templates:
+  real_estate: |
+    Hi,
+
+    I help real estate businesses generate more qualified leads through targeted outreach and digital channels.
+
+    Would you be open to a quick chat about how this could work for your agency?
+
+    Best regards,
+    John Doe
+
+  general: |
+    Hi,
+
+    I noticed your company and thought there might be a good fit for what we offer.
+
+    Happy to share more details if you're interested.
+
+    Best regards,
+    John Doe
+
+# Browser & runtime settings
+settings:
+  headless: false                # set true for fully background runs
+  timeout_ms: 30000              # page load / action timeout
+  delay_between_domains_sec: 10  # base delay (jitter added automatically)
+  max_retries_per_domain: 1
+  screenshot_on_every_attempt: true
+  screenshot_on_failure_only: false
+  user_agent: null               # null = Playwright default; or set a realistic one
+
+# Common contact page paths to try (in order)
+contact_paths:
+  - /contact
+  - /contact-us
+  - /contactus
+  - /get-in-touch
+  - /getintouch
+  - /about/contact
+  - /about-us/contact
+  - /en/contact
+  - /en/contact-us
+  - /reach-us
+  - /connect
+  - /support
+  - /help/contact
+
+# Words that strongly suggest a contact page (used when scanning nav)
+contact_keywords:
+  - contact
+  - get in touch
+  - reach us
+  - reach out
+  - enquire
+  - inquiry
+  - enquire now
+  - talk to us
+  - connect with us
