@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from playwright.async_api import Frame, Locator, Page
 
@@ -14,6 +13,7 @@ class FieldMatch:
     field_type: str
     score: float
     reason: str
+    required: bool = False
 
 
 FIELD_KEYWORDS: dict[str, list[str]] = {
@@ -25,7 +25,10 @@ FIELD_KEYWORDS: dict[str, list[str]] = {
     "company": ["company", "organization", "organisation", "business", "company name", "firm"],
     "website": ["website", "url", "web site", "homepage", "site"],
     "job_title": ["job title", "title", "position", "role"],
-    "message": ["message", "comment", "comments", "inquiry", "enquiry", "question", "details", "how can we help", "description", "body"],
+    "message": [
+        "message", "comment", "comments", "inquiry", "enquiry", "question",
+        "details", "how can we help", "description", "body",
+    ],
     "subject": ["subject", "topic", "regarding"],
 }
 
@@ -58,6 +61,37 @@ async def _get_field_signals(loc: Locator) -> str:
     return " ".join(parts).lower()
 
 
+async def _is_required(loc: Locator) -> bool:
+    """Detect if a field is required via attribute, aria, or label asterisk."""
+    try:
+        return await loc.evaluate(
+            """el => {
+                if (el.required) return true;
+                if ((el.getAttribute('aria-required') || '').toLowerCase() === 'true') return true;
+                const cls = (el.className || '').toString().toLowerCase();
+                if (cls.includes('required') || cls.includes('mandatory')) return true;
+
+                let labelText = '';
+                if (el.labels && el.labels.length) {
+                    labelText = el.labels[0].textContent || '';
+                } else if (el.id) {
+                    const l = document.querySelector('label[for="' + el.id + '"]');
+                    if (l) labelText = l.textContent || '';
+                }
+                const parent = el.closest('.form-group, .gfield, .hs-form-field, .field, .form-field, p, div');
+                if (parent) labelText += ' ' + (parent.innerText || '').slice(0, 120);
+
+                if (/\\*|required|mandatory/i.test(labelText)) return true;
+
+                if (el.getAttribute('data-required') === 'true') return true;
+
+                return false;
+            }"""
+        )
+    except Exception:
+        return False
+
+
 def _score_field(signals: str, field_type: str) -> float:
     keywords = FIELD_KEYWORDS.get(field_type, [])
     score = 0.0
@@ -68,16 +102,20 @@ def _score_field(signals: str, field_type: str) -> float:
 
 
 async def find_form_fields(page: Page | Frame) -> dict[str, FieldMatch]:
+    """
+    Return best matching locator for each logical field type.
+    Each FieldMatch includes required=True/False.
+    """
     candidates: dict[str, list[FieldMatch]] = {k: [] for k in FIELD_KEYWORDS}
 
-    inputs = page.locator("form input, form textarea, form select, input, textarea, select")
-    count = await inputs.count()
-    count = min(count, 60)
+    inputs = page.locator(
+        "form input, form textarea, form select, input, textarea, select"
+    )
+    count = min(await inputs.count(), 60)
 
     for i in range(count):
         loc = inputs.nth(i)
         try:
-            tag = await loc.evaluate("el => el.tagName.toLowerCase()")
             input_type = (await loc.get_attribute("type") or "").lower()
             if input_type in ("hidden", "submit", "button", "image", "file", "checkbox", "radio"):
                 continue
@@ -86,11 +124,21 @@ async def find_form_fields(page: Page | Frame) -> dict[str, FieldMatch]:
             if not signals.strip():
                 continue
 
+            required = await _is_required(loc)
+
             for field_type in FIELD_KEYWORDS:
                 sc = _score_field(signals, field_type)
                 if sc > 0:
+                    if required:
+                        sc += 0.25
                     candidates[field_type].append(
-                        FieldMatch(locator=loc, field_type=field_type, score=sc, reason=signals[:80])
+                        FieldMatch(
+                            locator=loc,
+                            field_type=field_type,
+                            score=sc,
+                            reason=signals[:80],
+                            required=required,
+                        )
                     )
         except Exception:
             continue
@@ -99,8 +147,16 @@ async def find_form_fields(page: Page | Frame) -> dict[str, FieldMatch]:
     used_selectors: set[str] = set()
 
     priority = [
-        "email", "message", "first_name", "last_name", "full_name",
-        "phone", "company", "website", "job_title", "subject",
+        "email",
+        "message",
+        "first_name",
+        "last_name",
+        "full_name",
+        "phone",
+        "company",
+        "website",
+        "job_title",
+        "subject",
     ]
     for ft in priority:
         matches = sorted(candidates.get(ft, []), key=lambda m: m.score, reverse=True)
