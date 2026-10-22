@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import Page
+import asyncio
 
 
 @dataclass
@@ -20,34 +21,55 @@ async def try_url(page: Page, url: str, timeout: int = 15_000) -> bool:
         resp = await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
         if resp and resp.status >= 400:
             return False
-        # brief pause so cookie banners / iframes can appear
-        await page.wait_for_timeout(700)
+        await asyncio.sleep(0.8)
         return True
     except Exception:
         return False
 
 
 async def page_looks_like_contact(page: Page, keywords: list[str]) -> bool:
+    """Stricter: real contact form prefers email + (message OR phone)."""
     try:
-        forms = await page.locator("form").count()
-        if forms == 0:
-            inputs = await page.locator("input, textarea").count()
-            if inputs < 2:
-                return False
+        has_real = await page.evaluate(
+            """() => {
+            for (const form of document.querySelectorAll('form')) {
+                const hasEmail = !!form.querySelector(
+                    'input[type="email"], input[name*="email" i], input[id*="email" i], input[placeholder*="email" i]'
+                );
+                const hasMessage = !!form.querySelector('textarea');
+                const hasPhone = !!form.querySelector(
+                    'input[type="tel"], input[name*="phone" i], input[id*="phone" i], input[placeholder*="phone" i]'
+                );
+                if (hasEmail && (hasMessage || hasPhone)) return true;
+            }
+            return false;
+        }"""
+        )
+        if has_real:
+            return True
 
-        text = (await page.inner_text("body")).lower()
-        for kw in keywords:
-            if kw.lower() in text:
+        body = (await page.inner_text("body")).lower()
+        if await page.locator("iframe").count() > 0:
+            if any(
+                k in body
+                for k in (
+                    "send us an email",
+                    "contact us",
+                    "get in touch",
+                    "contact form",
+                    "enquire",
+                    "inquiry",
+                )
+            ):
                 return True
+            for kw in keywords:
+                if kw.lower() in body:
+                    return True
+
         if await page.locator("input[type='email'], input[name*='email' i]").count() > 0:
-            if await page.locator(
-                "textarea, input[name*='message' i], input[name*='comment' i]"
-            ).count() > 0:
-                return True
-        # HubSpot / iframe forms often leave text like "send us an email"
-        if any(k in text for k in ("send us an email", "contact us", "get in touch")):
-            if await page.locator("iframe").count() > 0:
-                return True
+            for kw in keywords:
+                if kw.lower() in body:
+                    return True
     except Exception:
         return False
     return False
@@ -60,12 +82,6 @@ async def find_contact_page(
     contact_keywords: list[str],
     timeout_ms: int = 20_000,
 ) -> FindResult:
-    """
-    Returns FindResult with status:
-      - found: contact page located
-      - inaccessible: homepage could not be reached at all
-      - no_form: site reachable but no contact form found
-    """
     https_base = f"https://{domain}"
     http_base = f"http://{domain}"
 
@@ -76,10 +92,7 @@ async def find_contact_page(
         base = http_base
 
     if not homepage_ok:
-        return FindResult(
-            status="inaccessible",
-            notes="homepage_unreachable",
-        )
+        return FindResult(status="inaccessible", notes="homepage_unreachable")
 
     if await page_looks_like_contact(page, contact_keywords):
         return FindResult(status="found", url=page.url)
