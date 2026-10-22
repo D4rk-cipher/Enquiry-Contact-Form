@@ -7,8 +7,6 @@ Usage:
   python main.py --input data/emails.csv --mode test
   python main.py --input data/emails.csv --mode submit --resume
   python main.py --input data/emails.csv --mode test --template real_estate --limit 10
-
-On start you only pick the message template (simple prompt).
 """
 
 from __future__ import annotations
@@ -37,7 +35,6 @@ console = Console()
 
 
 def prompt_template() -> str | None:
-    """Simple template picker."""
     templates = list_templates("data/templates")
     if not templates:
         console.print("[yellow]No templates in data/templates/ — using config default message[/yellow]")
@@ -71,7 +68,7 @@ async def process_domain(
     message = get_message(config, template_name)
     contact_paths = config["contact_paths"]
     keywords = config["contact_keywords"]
-    timeout = int(settings.get("timeout_ms", 30_000))
+    timeout = min(int(settings.get("timeout_ms", 12_000)), 12_000)
     success_only = bool(settings.get("screenshot_on_success_only", True))
 
     page = await new_page(context)
@@ -120,7 +117,7 @@ async def process_domain(
             if clicked:
                 status = "submitted"
                 notes = notes + " | " + sub_notes
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(1500)
             else:
                 status = "filled_only"
                 notes = notes + " | " + sub_notes + " (submit_failed)"
@@ -212,9 +209,25 @@ async def run_bot(
 
             for idx, (domain, email) in enumerate(pairs, 1):
                 progress.update(task, description=f"[cyan]{domain}[/cyan]")
-                status = await process_domain(
-                    domain, email, config, mode, template_name, logger, context
-                )
+                try:
+                    # Hard ceiling so a hung domain cannot stall the whole run
+                    status = await asyncio.wait_for(
+                        process_domain(
+                            domain, email, config, mode, template_name, logger, context
+                        ),
+                        timeout=90.0,
+                    )
+                except asyncio.TimeoutError:
+                    status = "inaccessible"
+                    console.print(f"  [red]{'inaccessible':14}[/red] {domain} (timed out)")
+                    logger.log_result(
+                        domain=domain,
+                        original_email=email,
+                        contact_url="",
+                        status="inaccessible",
+                        notes="domain_timeout_90s",
+                        screenshot_path="",
+                    )
                 color = {
                     "submitted": "green",
                     "filled_only": "blue",
@@ -249,7 +262,6 @@ def main(
     limit: Optional[int] = typer.Option(None, "--limit", "-l"),
     email_column: Optional[str] = typer.Option(None, "--email-column"),
 ):
-    """Enquiry Contact Form Bot. Picks template interactively unless --template is set."""
     if mode not in ("test", "submit"):
         console.print("[red]mode must be 'test' or 'submit'[/red]")
         raise typer.Exit(1)
