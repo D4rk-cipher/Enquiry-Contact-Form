@@ -11,7 +11,8 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 @asynccontextmanager
 async def get_browser(settings: dict[str, Any]) -> AsyncIterator[BrowserContext]:
     headless = bool(settings.get("headless", False))
-    timeout = int(settings.get("timeout_ms", 30_000))
+    # Cap so a single dead site cannot stall forever
+    timeout = min(int(settings.get("timeout_ms", 15_000)), 15_000)
     user_agent = settings.get("user_agent")
 
     async with async_playwright() as p:
