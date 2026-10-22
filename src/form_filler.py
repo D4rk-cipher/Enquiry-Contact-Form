@@ -1,6 +1,7 @@
 """
 Fill contact forms: dismiss popups, reveal hidden sections, map fields, type values.
 Supports main page and iframes (HubSpot, etc.).
+Only fills required fields when they can be detected.
 """
 
 from __future__ import annotations
@@ -61,7 +62,6 @@ CLOSE_SELECTORS = [
 
 
 async def dismiss_popups(page: Page) -> None:
-    """Dismiss cookie banners, modals, and overlays."""
     for sel in COOKIE_SELECTORS + CLOSE_SELECTORS:
         try:
             loc = page.locator(sel).first
@@ -100,7 +100,6 @@ async def dismiss_popups(page: Page) -> None:
 
 
 async def click_contact_triggers(page: Page) -> None:
-    """Click JS triggers that reveal a contact form."""
     try:
         clicked = await page.evaluate(
             """() => {
@@ -125,7 +124,6 @@ async def click_contact_triggers(page: Page) -> None:
 
 
 async def human_type(locator, text: str) -> None:
-    """Type character-by-character with small random delays."""
     await locator.click(timeout=3000)
     await locator.fill("")
     for ch in text:
@@ -203,10 +201,15 @@ async def _fill_on_target(
 
     values = _value_map(profile, message)
 
-    for field_type, match in fields.items():
+    # Prefer required fields only. If none marked required, fill all matched.
+    required_fields = {k: v for k, v in fields.items() if v.required}
+    optional_fields = {k: v for k, v in fields.items() if not v.required}
+    to_fill = required_fields if required_fields else fields
+
+    for field_type, match in to_fill.items():
         value = values.get(field_type, "")
         if not value:
-            result.skipped.append(field_type)
+            result.skipped.append(f"{field_type}(no_value)")
             continue
         try:
             await match.locator.scroll_into_view_if_needed(timeout=3000)
@@ -217,10 +220,15 @@ async def _fill_on_target(
             else:
                 await match.locator.click(timeout=2000)
                 await match.locator.fill(value, timeout=5000)
-            result.filled.append(field_type)
+            tag = "req" if match.required else "opt"
+            result.filled.append(f"{field_type}({tag})")
             await asyncio.sleep(random.uniform(0.12, 0.35))
         except Exception as e:
             result.unknown_required.append(f"{field_type}:{type(e).__name__}")
+
+    if required_fields:
+        for field_type in optional_fields:
+            result.skipped.append(f"{field_type}(optional)")
 
     checked = await tick_required_checkboxes(target)
     result.filled.extend(checked)
@@ -241,7 +249,6 @@ async def fill_form(
     profile: dict[str, str],
     message: str,
 ) -> FillResult:
-    """Dismiss overlays, reveal forms, fill main page then iframes."""
     await asyncio.sleep(0.8)
     await dismiss_popups(page)
     await click_contact_triggers(page)
@@ -281,7 +288,6 @@ async def fill_form(
 
 
 async def submit_form(page: Page) -> tuple[bool, str]:
-    """Click submit on page or inside iframes."""
     selectors = [
         "form button[type='submit']",
         "form input[type='submit']",
