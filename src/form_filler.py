@@ -1,69 +1,143 @@
-"""Fill detected form fields and handle simple UI annoyances."""
+"""
+Fill contact forms: dismiss popups, reveal hidden sections, map fields, type values.
+Supports main page and iframes (HubSpot, etc.).
+"""
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+import random
+from dataclasses import dataclass, field
 
-from playwright.async_api import Frame, Page, TimeoutError as PlaywrightTimeout
+from playwright.async_api import Frame, Page
 
 from .form_analyzer import FieldMatch, find_form_fields
 
 
-# Cookie / consent selectors (buttons AND links)
+@dataclass
+class FillResult:
+    filled: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    unknown_required: list[str] = field(default_factory=list)
+    notes: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return len(self.filled) > 0
+
+
 COOKIE_SELECTORS = [
-    "#hs-eu-confirmation-button",           # HubSpot
+    "#hs-eu-confirmation-button",
     "#hs-eu-cookie-confirmation-button",
     "a#hs-eu-confirmation-button",
-    "button:has-text('Accept')",
+    "#onetrust-accept-btn-handler",
+    "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
     "button:has-text('Accept all')",
     "button:has-text('Accept All')",
     "button:has-text('Accept Cookies')",
+    "button:has-text('Accept')",
     "button:has-text('I agree')",
     "button:has-text('I Agree')",
-    "button:has-text('Got it')",
-    "button:has-text('OK')",
-    "button:has-text('Allow')",
     "button:has-text('Allow all')",
     "button:has-text('Allow All')",
-    "a:has-text('Accept')",
+    "button:has-text('Got it')",
+    "button:has-text('OK')",
     "a:has-text('Accept all')",
     "a:has-text('Accept All')",
+    "a:has-text('Accept')",
     "[aria-label='Accept']",
-    "[aria-label='Close']",
-    "[aria-label='close']",
     ".cookie-accept",
-    "#onetrust-accept-btn-handler",
     ".cc-btn.cc-dismiss",
     ".cc-allow",
-    "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
     "button[id*='accept' i]",
     "a[id*='accept' i]",
 ]
 
+CLOSE_SELECTORS = [
+    ".pum-close", ".popmake-close", ".popup-close", ".modal-close",
+    ".modal .close", "button.close", "[aria-label='Close']",
+    "[aria-label='close']", ".fancybox-close", ".mfp-close",
+]
 
-async def dismiss_common_overlays(page: Page) -> int:
-    """Best-effort close of cookie banners and simple modals. Returns clicks made."""
-    clicks = 0
-    for sel in COOKIE_SELECTORS:
+
+async def dismiss_popups(page: Page) -> None:
+    """Dismiss cookie banners, modals, and overlays."""
+    for sel in COOKIE_SELECTORS + CLOSE_SELECTORS:
         try:
             loc = page.locator(sel).first
-            if await loc.count() > 0 and await loc.is_visible(timeout=800):
-                await loc.click(timeout=2500)
-                clicks += 1
-                await page.wait_for_timeout(600)
+            if await loc.count() > 0 and await loc.is_visible(timeout=600):
+                await loc.click(timeout=2000)
+                await asyncio.sleep(0.4)
         except Exception:
             continue
-    if clicks:
-        await page.wait_for_timeout(800)
-    return clicks
+
+    try:
+        await page.evaluate(
+            """() => {
+                const sels = [
+                    '#hs-eu-confirmation-button', '#onetrust-accept-btn-handler',
+                    '.cookie-accept', '.cc-dismiss', '.pum-close', '.modal-close'
+                ];
+                for (const s of sels) {
+                    const el = document.querySelector(s);
+                    if (el) el.click();
+                }
+                document.querySelectorAll(
+                    '.pum-overlay, .pum-active, .modal-backdrop, .popup-overlay'
+                ).forEach(el => el.remove());
+                document.body.style.overflow = '';
+            }"""
+        )
+    except Exception:
+        pass
+
+    try:
+        await page.keyboard.press("Escape")
+    except Exception:
+        pass
+
+    await asyncio.sleep(0.5)
 
 
-async def tick_required_checkboxes(target: Page | Frame) -> None:
-    """Tick obvious required privacy / terms checkboxes."""
+async def click_contact_triggers(page: Page) -> None:
+    """Click JS triggers that reveal a contact form."""
+    try:
+        clicked = await page.evaluate(
+            """() => {
+                const byData = document.querySelector('[data-type*="CONTACT" i], [data-action*="contact" i]');
+                if (byData) { byData.click(); return 'data-type'; }
+                const texts = ['contact us', 'get in touch', 'send a message', 'enquire', 'inquiry', 'message us'];
+                const nodes = [...document.querySelectorAll('a, button, [role="button"], summary')];
+                for (const el of nodes) {
+                    const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    if (texts.some(x => t === x || t.startsWith(x))) {
+                        el.click();
+                        return t;
+                    }
+                }
+                return null;
+            }"""
+        )
+        if clicked:
+            await asyncio.sleep(0.8)
+    except Exception:
+        pass
+
+
+async def human_type(locator, text: str) -> None:
+    """Type character-by-character with small random delays."""
+    await locator.click(timeout=3000)
+    await locator.fill("")
+    for ch in text:
+        await locator.type(ch, delay=random.randint(25, 70))
+
+
+async def tick_required_checkboxes(target: Page | Frame) -> list[str]:
+    done: list[str] = []
     try:
         boxes = target.locator("input[type='checkbox']")
         count = await boxes.count()
-        for i in range(min(count, 10)):
+        for i in range(min(count, 12)):
             box = boxes.nth(i)
             try:
                 if await box.is_checked():
@@ -74,109 +148,141 @@ async def tick_required_checkboxes(target: Page | Frame) -> None:
                         return el.parentElement ? el.parentElement.textContent || '' : '';
                     }"""
                 )
-                label_text = (label_text or "").lower()
+                combined = (label_text or "").lower()
+                if any(k in combined for k in ("newsletter", "subscribe", "marketing", "promotional")):
+                    continue
                 if any(
-                    k in label_text
-                    for k in ("privacy", "terms", "agree", "consent", "policy", "gdpr")
+                    k in combined
+                    for k in ("privacy", "terms", "agree", "consent", "policy", "gdpr", "acknowledge")
                 ):
-                    await box.check(timeout=2000)
+                    await box.check(timeout=2500)
+                    done.append("checkbox")
             except Exception:
                 continue
     except Exception:
         pass
+    return done
+
+
+def _value_map(profile: dict[str, str], message: str) -> dict[str, str]:
+    full = profile.get("full_name") or f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
+    return {
+        "first_name": profile.get("first_name", ""),
+        "last_name": profile.get("last_name", ""),
+        "full_name": full,
+        "name": full,
+        "email": profile.get("email", ""),
+        "email_confirm": profile.get("email", ""),
+        "company_email": profile.get("company_email") or profile.get("email", ""),
+        "phone": profile.get("phone", ""),
+        "company": profile.get("company", ""),
+        "website": profile.get("website", ""),
+        "job_title": profile.get("job_title", ""),
+        "message": message,
+        "subject": (message.split("\n")[0][:80] if message else "Inquiry"),
+        "address": profile.get("address", ""),
+        "city": profile.get("city", ""),
+        "state": profile.get("state", ""),
+        "zip": profile.get("zip", ""),
+        "country": profile.get("country", "United States"),
+        "preferred_contact": profile.get("preferred_contact", "email"),
+    }
 
 
 async def _fill_on_target(
     target: Page | Frame,
     profile: dict[str, str],
     message: str,
-) -> tuple[bool, str]:
-    """Run field detection + fill on a Page or Frame."""
-    fields = await find_form_fields(target)  # type: ignore[arg-type]
+    use_human_type: bool = True,
+) -> FillResult:
+    result = FillResult()
+    fields = await find_form_fields(target)
     if not fields:
-        return False, "no_fillable_fields_found"
+        result.notes = "no_fillable_fields_found"
+        return result
 
-    filled: list[str] = []
-    errors: list[str] = []
-
-    value_map = {
-        "first_name": profile.get("first_name", ""),
-        "last_name": profile.get("last_name", ""),
-        "full_name": profile.get("full_name")
-        or f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip(),
-        "email": profile.get("email", ""),
-        "phone": profile.get("phone", ""),
-        "company": profile.get("company", ""),
-        "website": profile.get("website", ""),
-        "job_title": profile.get("job_title", ""),
-        "message": message,
-        "subject": message.split("\n")[0][:80] if message else "Inquiry",
-    }
+    values = _value_map(profile, message)
 
     for field_type, match in fields.items():
-        value = value_map.get(field_type, "")
+        value = values.get(field_type, "")
         if not value:
+            result.skipped.append(field_type)
             continue
         try:
             await match.locator.scroll_into_view_if_needed(timeout=3000)
-            await match.locator.click(timeout=2000)
-            await match.locator.fill(value, timeout=5000)
-            filled.append(field_type)
-            await target.wait_for_timeout(150)
+            if use_human_type and field_type in (
+                "message", "subject", "full_name", "first_name", "last_name", "email", "company"
+            ):
+                await human_type(match.locator, value)
+            else:
+                await match.locator.click(timeout=2000)
+                await match.locator.fill(value, timeout=5000)
+            result.filled.append(field_type)
+            await asyncio.sleep(random.uniform(0.12, 0.35))
         except Exception as e:
-            errors.append(f"{field_type}:{type(e).__name__}")
+            result.unknown_required.append(f"{field_type}:{type(e).__name__}")
 
-    await tick_required_checkboxes(target)
+    checked = await tick_required_checkboxes(target)
+    result.filled.extend(checked)
 
-    if not filled:
-        return False, "could_not_fill_any_fields: " + ",".join(errors)
-
-    notes = "filled=" + ",".join(filled)
-    if errors:
-        notes += " | errors=" + ",".join(errors)
-    return True, notes
+    if result.filled:
+        result.notes = "filled=" + ",".join(result.filled)
+    else:
+        result.notes = "could_not_fill_any_fields"
+    if result.skipped:
+        result.notes += " | skipped=" + ",".join(result.skipped)
+    if result.unknown_required:
+        result.notes += " | unknown=" + ",".join(result.unknown_required)
+    return result
 
 
 async def fill_form(
     page: Page,
     profile: dict[str, str],
     message: str,
-) -> tuple[bool, str]:
-    """
-    Detect fields and fill them.
-    Tries main page first, then HubSpot / embed iframes.
-    Returns (success: bool, notes: str)
-    """
-    await page.wait_for_timeout(800)
-    await dismiss_common_overlays(page)
-    await page.wait_for_timeout(500)
+) -> FillResult:
+    """Dismiss overlays, reveal forms, fill main page then iframes."""
+    await asyncio.sleep(0.8)
+    await dismiss_popups(page)
+    await click_contact_triggers(page)
 
-    ok, notes = await _fill_on_target(page, profile, message)
-    if ok:
-        return True, notes
+    try:
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(0.5)
+        await page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(0.3)
+    except Exception:
+        pass
+
+    await dismiss_popups(page)
+
+    result = await _fill_on_target(page, profile, message)
+    if result.ok:
+        return result
 
     try:
         for frame in page.frames:
             if frame == page.main_frame:
                 continue
+            url = (frame.url or "").lower()
+            if any(x in url for x in ("google.com/maps", "facebook", "doubleclick", "analytics", "gtm")):
+                continue
             try:
-                url = (frame.url or "").lower()
-                if any(x in url for x in ("google.com/maps", "facebook", "doubleclick", "analytics")):
-                    continue
-                ok, frame_notes = await _fill_on_target(frame, profile, message)
-                if ok:
-                    return True, f"iframe:{frame_notes}"
+                fr = await _fill_on_target(frame, profile, message)
+                if fr.ok:
+                    fr.notes = "iframe:" + fr.notes
+                    return fr
             except Exception:
                 continue
     except Exception:
         pass
 
-    return False, notes
+    return result
 
 
 async def submit_form(page: Page) -> tuple[bool, str]:
-    """Attempt to click a submit button on page or in iframes."""
-    submit_selectors = [
+    """Click submit on page or inside iframes."""
+    selectors = [
         "form button[type='submit']",
         "form input[type='submit']",
         "button[type='submit']",
@@ -192,19 +298,29 @@ async def submit_form(page: Page) -> tuple[bool, str]:
         "[type='submit']",
     ]
 
-    async def try_submit(target: Page | Frame) -> tuple[bool, str]:
-        for sel in submit_selectors:
+    async def try_target(target: Page | Frame) -> tuple[bool, str]:
+        for sel in selectors:
             try:
                 loc = target.locator(sel).first
                 if await loc.count() > 0 and await loc.is_visible(timeout=1000):
                     await loc.click(timeout=5000)
-                    await page.wait_for_timeout(1500)
+                    await asyncio.sleep(1.5)
                     return True, f"clicked:{sel}"
             except Exception:
                 continue
+        try:
+            for btn in await target.locator("form button, form [role='button']").all():
+                text = ((await btn.inner_text()) or "").strip().lower()
+                if any(k in text for k in ("send", "submit", "contact", "enquire", "inquire")):
+                    if await btn.is_visible():
+                        await btn.click(timeout=5000)
+                        await asyncio.sleep(1.5)
+                        return True, f"clicked:text:{text[:30]}"
+        except Exception:
+            pass
         return False, "no_submit_button_found"
 
-    ok, notes = await try_submit(page)
+    ok, notes = await try_target(page)
     if ok:
         return ok, notes
 
@@ -212,7 +328,7 @@ async def submit_form(page: Page) -> tuple[bool, str]:
         if frame == page.main_frame:
             continue
         try:
-            ok, notes = await try_submit(frame)
+            ok, notes = await try_target(frame)
             if ok:
                 return True, f"iframe:{notes}"
         except Exception:
