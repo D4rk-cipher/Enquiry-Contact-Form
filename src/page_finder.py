@@ -20,6 +20,8 @@ async def try_url(page: Page, url: str, timeout: int = 15_000) -> bool:
         resp = await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
         if resp and resp.status >= 400:
             return False
+        # brief pause so cookie banners / iframes can appear
+        await page.wait_for_timeout(700)
         return True
     except Exception:
         return False
@@ -41,6 +43,10 @@ async def page_looks_like_contact(page: Page, keywords: list[str]) -> bool:
             if await page.locator(
                 "textarea, input[name*='message' i], input[name*='comment' i]"
             ).count() > 0:
+                return True
+        # HubSpot / iframe forms often leave text like "send us an email"
+        if any(k in text for k in ("send us an email", "contact us", "get in touch")):
+            if await page.locator("iframe").count() > 0:
                 return True
     except Exception:
         return False
