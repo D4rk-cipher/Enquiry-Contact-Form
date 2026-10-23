@@ -3,10 +3,12 @@
 """
 Enquiry Contact Form Bot - Phase 1
 
-Usage:
+Interactive (default):
+  python main.py
+
+CLI:
   python main.py --input data/emails.csv --mode test
-  python main.py --input data/emails.csv --mode submit --resume
-  python main.py --input data/emails.csv --mode test --template real_estate --limit 10
+  python main.py --input data/emails.csv --mode submit --resume --template real_estate
 """
 
 from __future__ import annotations
@@ -19,9 +21,8 @@ from typing import Optional
 import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
-from rich.prompt import Prompt
 
-from src.config import load_config, get_message, get_profile, list_templates
+from src.config import load_config, get_message, get_profile
 from src.domain_extractor import load_domains_from_csv
 from src.browser import get_browser, new_page
 from src.page_finder import find_contact_page
@@ -29,29 +30,10 @@ from src.form_filler import fill_form, submit_form
 from src.captcha_detector import page_has_captcha
 from src.logger import RunLogger
 from src.utils import polite_delay
+from src import ui
 
 app = typer.Typer(add_completion=False, help="Enquiry Contact Form Bot - Phase 1")
 console = Console()
-
-
-def prompt_template() -> str | None:
-    templates = list_templates("data/templates")
-    if not templates:
-        console.print("[yellow]No templates in data/templates/ — using config default message[/yellow]")
-        return None
-
-    console.print("\n[bold]Select a message template:[/bold]")
-    for i, t in enumerate(templates, 1):
-        console.print(f"  {i}) {t.replace('_', ' ').title()}")
-    console.print()
-
-    while True:
-        raw = Prompt.ask("Enter number", default="1")
-        if raw.isdigit() and 1 <= int(raw) <= len(templates):
-            choice = templates[int(raw) - 1]
-            console.print(f"  → [green]{choice}[/green]\n")
-            return choice
-        console.print(f"  Enter a number between 1 and {len(templates)}")
 
 
 async def process_domain(
@@ -166,12 +148,17 @@ async def run_bot(
     d_min = float(settings.get("delay_min", settings.get("delay_between_domains_sec", 8)))
     d_max = float(settings.get("delay_max", max(d_min + 5, 15)))
 
-    if not template_name:
-        template_name = prompt_template()
+    ok, msg, n = ui.validate_csv(input_path)
+    if not ok:
+        console.print(f"[red]Cannot start:[/red] {msg}")
+        raise typer.Exit(1)
+
+    for w in ui.validate_profile(config):
+        console.print(f"[yellow]Warning:[/yellow] {w}")
 
     console.print(f"[bold]Loading domains from[/bold] {input_path}")
     pairs = load_domains_from_csv(input_path, email_column)
-    console.print(f"Found [green]{len(pairs)}[/green] unique domains")
+    console.print(f"Found [green]{len(pairs)}[/green] unique domains ({msg})")
 
     logger = RunLogger(output_dir="output")
 
@@ -188,6 +175,10 @@ async def run_bot(
 
     if not pairs:
         console.print("[yellow]Nothing to process.[/yellow]")
+        console.print(
+            "[dim]Tip: all domains may already be in output/progress.json — "
+            "delete it to re-run, or turn resume off.[/dim]"
+        )
         return
 
     console.rule("[bold]Contact Form Bot[/bold]")
@@ -210,7 +201,6 @@ async def run_bot(
             for idx, (domain, email) in enumerate(pairs, 1):
                 progress.update(task, description=f"[cyan]{domain}[/cyan]")
                 try:
-                    # Hard ceiling so a hung domain cannot stall the whole run
                     status = await asyncio.wait_for(
                         process_domain(
                             domain, email, config, mode, template_name, logger, context
@@ -242,31 +232,79 @@ async def run_bot(
                 if idx < len(pairs):
                     await polite_delay(d_min, d_max)
 
-    console.print()
-    console.print("[bold green]Done.[/bold green] Results → output/results.csv")
-    console.print("CAPTCHA / manual → output/needs_captcha.csv")
-    console.print("Progress saved → output/progress.json")
+    ui.print_run_summary(Path("output"))
+
+
+def interactive_loop(config_path: Path = Path("config.yaml")) -> None:
+    while True:
+        action = ui.main_menu(config_path)
+
+        if action == "exit":
+            console.print("[dim]Bye.[/dim]")
+            return
+
+        if action == "profile":
+            config = load_config(config_path)
+            ui.show_profile(config)
+            for w in ui.validate_profile(config):
+                console.print(f"[yellow]• {w}[/yellow]")
+            ui.pause()
+            continue
+
+        if action == "templates":
+            ui.show_templates()
+            ui.pause()
+            continue
+
+        if action == "results":
+            ui.show_last_results(Path("output"))
+            ui.pause()
+            continue
+
+        if action == "run":
+            opts = ui.run_wizard(config_path)
+            if not opts:
+                continue
+            try:
+                asyncio.run(run_bot(**opts))
+            except typer.Exit:
+                pass
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Stopped by user.[/yellow]")
+            ui.pause()
+            continue
 
 
 @app.command()
 def main(
-    input: Path = typer.Option(
-        Path("data/emails.csv"), "--input", "-i", help="CSV or list of emails"
+    input: Optional[Path] = typer.Option(
+        None, "--input", "-i", help="CSV / email list (omit for interactive menu)"
     ),
     mode: str = typer.Option("test", "--mode", "-m", help="test | submit"),
     config: Path = typer.Option("config.yaml", "--config", "-c"),
     template: Optional[str] = typer.Option(
-        None, "--template", "-t", help="Skip prompt: template name from data/templates/"
+        None, "--template", "-t", help="Template name from data/templates/"
     ),
     resume: bool = typer.Option(False, "--resume", help="Skip already processed domains"),
     limit: Optional[int] = typer.Option(None, "--limit", "-l"),
     email_column: Optional[str] = typer.Option(None, "--email-column"),
+    menu: bool = typer.Option(False, "--menu", help="Force interactive menu"),
 ):
+    """Enquiry Contact Form Bot. No args → interactive menu."""
+    if input is None or menu:
+        interactive_loop(config)
+        return
+
     if mode not in ("test", "submit"):
         console.print("[red]mode must be 'test' or 'submit'[/red]")
         raise typer.Exit(1)
     if not input.exists():
         console.print(f"[red]Input file not found: {input}[/red]")
+        raise typer.Exit(1)
+
+    ok, msg, _ = ui.validate_csv(input)
+    if not ok:
+        console.print(f"[red]{msg}[/red]")
         raise typer.Exit(1)
 
     asyncio.run(
@@ -283,4 +321,7 @@ def main(
 
 
 if __name__ == "__main__":
-    app()
+    if len(sys.argv) == 1:
+        interactive_loop(Path("config.yaml"))
+    else:
+        app()
