@@ -160,6 +160,59 @@ def show_last_results(output_dir: Path = Path("output")) -> None:
     )
 
 
+def clear_output(output_dir: Path = Path("output")) -> None:
+    """Delete run logs, progress, and screenshots after confirmation."""
+    output_dir = Path(output_dir)
+    if not output_dir.exists():
+        console.print("[yellow]No output folder yet.[/yellow]")
+        return
+
+    targets = [
+        output_dir / "results.csv",
+        output_dir / "needs_captcha.csv",
+        output_dir / "inaccessible.csv",
+        output_dir / "progress.json",
+    ]
+    shot_dir = output_dir / "screenshots"
+    shots = list(shot_dir.glob("*.png")) if shot_dir.exists() else []
+
+    existing = [p for p in targets if p.exists()]
+    if not existing and not shots:
+        console.print("[yellow]Output folder is already empty.[/yellow]")
+        return
+
+    console.print("\n[bold]Will delete:[/bold]")
+    for p in existing:
+        console.print(f"  • {p}")
+    if shots:
+        console.print(f"  • {shot_dir}/ ({len(shots)} screenshot(s))")
+    console.print()
+
+    if not Confirm.ask(
+        "[bold red]Clear all results? This cannot be undone.[/bold red]",
+        default=False,
+    ):
+        console.print("[dim]Cancelled.[/dim]")
+        return
+
+    removed = 0
+    for p in existing:
+        try:
+            p.unlink()
+            removed += 1
+        except Exception as e:
+            console.print(f"[red]Could not delete {p}: {e}[/red]")
+    for p in shots:
+        try:
+            p.unlink()
+            removed += 1
+        except Exception:
+            pass
+
+    console.print(f"[green]Cleared.[/green] Removed {removed} file(s).")
+    console.print("[dim]Next run will start fresh (no resume data).[/dim]")
+
+
 def pick_csv() -> Path | None:
     default = Path("data/emails.csv")
     while True:
@@ -280,11 +333,12 @@ def main_menu(config_path: Path = Path("config.yaml")) -> str:
             "View / check profile",
             "View message templates",
             "View last results summary",
+            "Clear results folder",
             "Exit",
         ],
         default=1,
     )
-    return ["run", "profile", "templates", "results", "exit"][idx - 1]
+    return ["run", "profile", "templates", "results", "clear", "exit"][idx - 1]
 
 
 def print_run_summary(logger_output: Path = Path("output")) -> None:
