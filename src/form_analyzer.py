@@ -57,6 +57,51 @@ FIELD_KEYWORDS: dict[str, list[str]] = {
     "country": ["country", "nation"],
 }
 
+NEWSLETTER_SIGNALS = (
+    "newsletter", "subscribe", "subscription", "signup", "sign up", "sign-up",
+    "mailing list", "mail list", "join our", "stay updated", "stay informed",
+    "get updates", "promo", "promotional", "coupon", "discount code",
+    "footer-email", "footer_email", "mc-embedded", "mailchimp", "klavio",
+    "klaviyo", "email-signup", "email_signup", "opt-in", "optin",
+)
+SEARCH_SIGNALS = ("search", "query")
+
+
+def _is_newsletter_or_search(signals: str) -> bool:
+    s = (signals or "").lower()
+    if any(x in s for x in SEARCH_SIGNALS) and "message" not in s and "contact" not in s:
+        return True
+    if any(x in s for x in NEWSLETTER_SIGNALS):
+        return True
+    return False
+
+
+async def _form_looks_like_newsletter(loc: Locator) -> bool:
+    try:
+        return await loc.evaluate(
+            """el => {
+                const form = el.closest('form');
+                if (!form) return false;
+                const t = ((form.getAttribute('id')||'') + ' ' +
+                           (form.getAttribute('class')||'') + ' ' +
+                           (form.getAttribute('action')||'') + ' ' +
+                           (form.innerText||'').slice(0, 200)).toLowerCase();
+                const bad = ['newsletter','subscribe','subscription','signup','sign-up',
+                             'mailing list','mailchimp','klaviyo','footer-email','opt-in'];
+                if (bad.some(b => t.includes(b))) return true;
+                const inputs = form.querySelectorAll('input:not([type=hidden]):not([type=submit]):not([type=checkbox])');
+                const areas = form.querySelectorAll('textarea');
+                if (areas.length === 0 && inputs.length <= 2) {
+                    const hasEmail = !!form.querySelector('input[type=email], input[name*=email i]');
+                    const hasMessageWords = /message|comment|enquiry|inquiry|question/.test(t);
+                    if (hasEmail && !hasMessageWords) return true;
+                }
+                return false;
+            }"""
+        )
+    except Exception:
+        return False
+
 
 async def _get_field_signals(loc: Locator) -> str:
     parts: list[str] = []
@@ -139,10 +184,11 @@ async def find_form_fields(page: Page | Frame) -> dict[str, FieldMatch]:
             input_type = (await loc.get_attribute("type") or "").lower()
             if input_type in ("hidden", "submit", "button", "image", "file", "checkbox", "radio", "password"):
                 continue
+            if await _form_looks_like_newsletter(loc):
+                continue
             signals = await _get_field_signals(loc)
-            if any(x in signals for x in ("search", "subscribe", "newsletter", "promo")):
-                if "email" not in signals and "message" not in signals:
-                    continue
+            if _is_newsletter_or_search(signals):
+                continue
 
             required = await _is_required(loc)
             type_boost: dict[str, float] = {}
@@ -190,7 +236,6 @@ async def find_form_fields(page: Page | Frame) -> dict[str, FieldMatch]:
 
 
 async def find_fallback_fields(page: Page | Frame) -> list[FieldMatch]:
-    """Last resort: visible email / textarea / text inputs without keyword match."""
     results: list[FieldMatch] = []
     used: set[str] = set()
 
@@ -211,11 +256,17 @@ async def find_fallback_fields(page: Page | Frame) -> list[FieldMatch]:
 
     n = min(await page.locator("input[type='email']").count(), 5)
     for i in range(n):
-        await add(page.locator("input[type='email']").nth(i), "email", 2.0, "type=email")
+        loc = page.locator("input[type='email']").nth(i)
+        if await _form_looks_like_newsletter(loc):
+            continue
+        await add(loc, "email", 2.0, "type=email")
 
     n = min(await page.locator("textarea").count(), 5)
     for i in range(n):
-        await add(page.locator("textarea").nth(i), "message", 2.0, "textarea")
+        loc = page.locator("textarea").nth(i)
+        if await _form_looks_like_newsletter(loc):
+            continue
+        await add(loc, "message", 2.0, "textarea")
 
     n = min(await page.locator("input[type='tel']").count(), 3)
     for i in range(n):
@@ -225,8 +276,10 @@ async def find_fallback_fields(page: Page | Frame) -> list[FieldMatch]:
     for i in range(n):
         loc = page.locator("input[type='text'], input:not([type])").nth(i)
         try:
+            if await _form_looks_like_newsletter(loc):
+                continue
             signals = await _get_field_signals(loc)
-            if any(x in signals for x in ("search", "subscribe", "newsletter", "coupon", "promo")):
+            if _is_newsletter_or_search(signals):
                 continue
             ft = "full_name"
             if any(x in signals for x in ("email", "mail")):
