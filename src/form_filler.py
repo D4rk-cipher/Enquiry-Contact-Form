@@ -1,9 +1,9 @@
 """
 Fill contact forms with high coverage:
-  1) dismiss popups / reveal sections
+  1) dismiss popups / entry gates / reveal sections
   2) wait for JS forms
-  3) fill required (or all matched) fields
-  4) fallback: any email / textarea / name-like inputs
+  3) fill required (or all matched) fields — never newsletter boxes
+  4) fallback: email / textarea / name on real contact forms only
   5) iframes included
 """
 
@@ -31,33 +31,18 @@ class FillResult:
 
 
 COOKIE_SELECTORS = [
-    "#hs-eu-confirmation-button",
-    "#hs-eu-cookie-confirmation-button",
-    "a#hs-eu-confirmation-button",
-    "#onetrust-accept-btn-handler",
+    "#hs-eu-confirmation-button", "#hs-eu-cookie-confirmation-button",
+    "a#hs-eu-confirmation-button", "#onetrust-accept-btn-handler",
     "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
-    "#accept-cookie",
-    "#cookie-accept",
-    "button:has-text('Accept all')",
-    "button:has-text('Accept All')",
-    "button:has-text('Accept Cookies')",
-    "button:has-text('Accept')",
-    "button:has-text('I agree')",
-    "button:has-text('I Agree')",
-    "button:has-text('Allow all')",
-    "button:has-text('Allow All')",
-    "button:has-text('Got it')",
-    "button:has-text('OK')",
-    "button:has-text('Agree')",
-    "a:has-text('Accept all')",
-    "a:has-text('Accept All')",
-    "a:has-text('Accept')",
-    "[aria-label='Accept']",
-    ".cookie-accept",
-    ".cc-btn.cc-dismiss",
-    ".cc-allow",
-    "button[id*='accept' i]",
-    "a[id*='accept' i]",
+    "#accept-cookie", "#cookie-accept",
+    "button:has-text('Accept all')", "button:has-text('Accept All')",
+    "button:has-text('Accept Cookies')", "button:has-text('Accept')",
+    "button:has-text('I agree')", "button:has-text('I Agree')",
+    "button:has-text('Allow all')", "button:has-text('Allow All')",
+    "button:has-text('Got it')", "button:has-text('OK')", "button:has-text('Agree')",
+    "a:has-text('Accept all')", "a:has-text('Accept All')", "a:has-text('Accept')",
+    "[aria-label='Accept']", ".cookie-accept", ".cc-btn.cc-dismiss", ".cc-allow",
+    "button[id*='accept' i]", "a[id*='accept' i]",
 ]
 
 CLOSE_SELECTORS = [
@@ -101,6 +86,63 @@ async def dismiss_popups(page: Page) -> None:
     except Exception:
         pass
     await asyncio.sleep(0.4)
+
+
+async def click_entry_gates(page: Page) -> None:
+    """Click splash / age-gate / Enter site buttons that block the real page."""
+    texts = [
+        "enter site", "enter the site", "enter website", "enter",
+        "i am 18", "i am 18+", "i am over 18", "i am over 21", "i am 21",
+        "yes, i am", "yes i am", "i agree", "i accept",
+        "continue", "continue to site", "continue to website",
+        "proceed", "go to site", "go to website", "view site", "view website",
+        "access site", "let me in", "i understand", "got it",
+        "start browsing", "browse site",
+    ]
+    for text in texts:
+        try:
+            loc = page.locator(
+                f"button:has-text('{text}'), a:has-text('{text}'), [role='button']:has-text('{text}')"
+            )
+            if await loc.count() > 0 and await loc.first.is_visible(timeout=400):
+                await loc.first.click(timeout=2000)
+                await asyncio.sleep(0.9)
+                return
+        except Exception:
+            continue
+    try:
+        clicked = await page.evaluate(
+            """() => {
+                const phrases = [
+                    'enter site','enter the site','enter website','enter',
+                    'i am 18','i am 18+','i am over 18','i am over 21','i am 21',
+                    'yes, i am','yes i am','continue to site','continue to website',
+                    'continue','proceed','go to site','view site','access site',
+                    'let me in','i understand','start browsing','browse site',
+                    'i agree','i accept'
+                ];
+                const nodes = [...document.querySelectorAll(
+                    'button, a, [role="button"], input[type="button"], input[type="submit"], .btn, [onclick]'
+                )];
+                for (const el of nodes) {
+                    const t = (el.innerText || el.value || el.textContent || '').trim().toLowerCase();
+                    if (!t || t.length > 40) continue;
+                    if (phrases.some(p => t === p || t.startsWith(p))) {
+                        el.click();
+                        return t;
+                    }
+                }
+                for (const el of nodes) {
+                    const t = (el.innerText || el.value || '').trim().toLowerCase();
+                    if (t === 'yes' || t === 'y') { el.click(); return t; }
+                }
+                return null;
+            }"""
+        )
+        if clicked:
+            await asyncio.sleep(1.0)
+    except Exception:
+        pass
 
 
 async def click_contact_triggers(page: Page) -> None:
@@ -223,11 +265,7 @@ async def _fill_matches(
     use_human_type: bool,
 ) -> FillResult:
     result = FillResult()
-    if isinstance(matches, dict):
-        items = list(matches.items())
-    else:
-        items = [(m.field_type, m) for m in matches]
-
+    items = list(matches.items()) if isinstance(matches, dict) else [(m.field_type, m) for m in matches]
     for field_type, match in items:
         value = values.get(field_type, "") or values.get("full_name" if field_type == "name" else "", "")
         if not value:
@@ -288,6 +326,13 @@ async def _fill_on_target(
     checked = await tick_required_checkboxes(target)
     result.filled.extend(checked)
 
+    # Reject subscribe-only fills (email alone is not a contact form)
+    types = {x.split("(")[0] for x in result.filled if x != "checkbox"}
+    if types and types <= {"email", "email_confirm"}:
+        result.filled = []
+        result.notes = "skipped_newsletter_like_form"
+        return result
+
     if result.filled:
         result.notes = "filled=" + ",".join(result.filled) + (
             (" | " + result.notes) if result.notes else ""
@@ -306,6 +351,8 @@ async def fill_form(
     profile: dict[str, str],
     message: str,
 ) -> FillResult:
+    await dismiss_popups(page)
+    await click_entry_gates(page)
     await dismiss_popups(page)
     await click_contact_triggers(page)
     await wait_for_form_ready(page)
@@ -354,21 +401,13 @@ async def fill_form(
 
 async def submit_form(page: Page) -> tuple[bool, str]:
     selectors = [
-        "form button[type='submit']",
-        "form input[type='submit']",
-        "button[type='submit']",
-        "input[type='submit']",
-        "button:has-text('Submit')",
-        "button:has-text('Send')",
-        "button:has-text('Send message')",
-        "button:has-text('Send Message')",
-        "button:has-text('Contact us')",
-        "button:has-text('Get in touch')",
-        "button:has-text('Enquire')",
-        "button:has-text('Inquire')",
-        "input[value='Submit']",
-        "input[value='Send']",
-        "[type='submit']",
+        "form button[type='submit']", "form input[type='submit']",
+        "button[type='submit']", "input[type='submit']",
+        "button:has-text('Submit')", "button:has-text('Send')",
+        "button:has-text('Send message')", "button:has-text('Send Message')",
+        "button:has-text('Contact us')", "button:has-text('Get in touch')",
+        "button:has-text('Enquire')", "button:has-text('Inquire')",
+        "input[value='Submit']", "input[value='Send']", "[type='submit']",
     ]
 
     async def try_target(target: Page | Frame) -> tuple[bool, str]:
@@ -385,10 +424,7 @@ async def submit_form(page: Page) -> tuple[bool, str]:
         try:
             for btn in await target.locator("form button, form [role='button'], button").all():
                 text = ((await btn.inner_text()) or "").strip().lower()
-                if any(
-                    k in text
-                    for k in ("send", "submit", "contact", "enquire", "inquire", "get in touch")
-                ):
+                if any(k in text for k in ("send", "submit", "contact", "enquire", "inquire", "get in touch")):
                     if await btn.is_visible():
                         await btn.click(timeout=5000)
                         await asyncio.sleep(1.5)
