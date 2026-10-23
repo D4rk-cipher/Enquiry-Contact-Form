@@ -29,10 +29,32 @@ async def try_url(page: Page, url: str, timeout: int = NAV_TIMEOUT_MS) -> bool:
         if resp and resp.status >= 400:
             return False
         try:
-            await page.wait_for_load_state("domcontentloaded", timeout=min(4000, timeout))
+            await page.wait_for_load_state("domcontentloaded", timeout=min(5000, timeout))
         except Exception:
             pass
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.5)
+        # Dismiss simple entry gates / age walls on landing pages
+        try:
+            await page.evaluate(
+                """() => {
+                const phrases = [
+                    'enter site','enter the site','enter','continue','proceed',
+                    'i am 18','i am 18+','i am over 18','yes','i agree','i accept',
+                    'view site','go to site','access site'
+                ];
+                for (const el of document.querySelectorAll('button, a, [role=button], input[type=button]')) {
+                    const t = (el.innerText || el.value || '').trim().toLowerCase();
+                    if (t && t.length < 36 && phrases.some(p => t === p || t.startsWith(p))) {
+                        el.click();
+                        return true;
+                    }
+                }
+                return false;
+            }"""
+            )
+            await asyncio.sleep(0.6)
+        except Exception:
+            pass
         return True
     except PlaywrightTimeout:
         try:
@@ -53,6 +75,8 @@ async def page_looks_like_contact(page: Page, keywords: list[str]) -> bool:
         has_real = await page.evaluate(
             """() => {
             for (const form of document.querySelectorAll('form')) {
+                const t = ((form.id||'')+' '+(form.className||'')+' '+(form.action||'')).toLowerCase();
+                if (/newsletter|subscribe|signup|mailchimp|klaviyo/.test(t)) continue;
                 const hasEmail = !!form.querySelector(
                     'input[type="email"], input[name*="email" i], input[id*="email" i], input[placeholder*="email" i]'
                 );
