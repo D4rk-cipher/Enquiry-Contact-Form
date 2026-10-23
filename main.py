@@ -261,6 +261,11 @@ def interactive_loop(config_path: Path = Path("config.yaml")) -> None:
             ui.pause()
             continue
 
+        if action == "clear":
+            ui.clear_output(Path("output"))
+            ui.pause()
+            continue
+
         if action == "run":
             opts = ui.run_wizard(config_path)
             if not opts:
