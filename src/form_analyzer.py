@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 from playwright.async_api import Frame, Locator, Page
 
+from .form_platforms import PlatformInfo, boost_signals, field_scope_selector
+
 
 @dataclass
 class FieldMatch:
@@ -173,10 +175,18 @@ def _score_field(signals: str, field_type: str) -> float:
     return score
 
 
-async def find_form_fields(page: Page | Frame) -> dict[str, FieldMatch]:
+async def find_form_fields(
+    page: Page | Frame,
+    platform: PlatformInfo | None = None,
+) -> dict[str, FieldMatch]:
+    """Best match per logical field type. Optionally scoped to a Tier-1 platform."""
     candidates: dict[str, list[FieldMatch]] = {k: [] for k in FIELD_KEYWORDS}
-    inputs = page.locator("form input, form textarea, form select, input, textarea, select")
+    scope = field_scope_selector(platform) if platform else (
+        "form input, form textarea, form select, input, textarea, select"
+    )
+    inputs = page.locator(scope)
     count = min(await inputs.count(), 80)
+    platform_name = platform.name if platform else "generic"
 
     for i in range(count):
         loc = inputs.nth(i)
@@ -201,7 +211,11 @@ async def find_form_fields(page: Page | Frame) -> dict[str, FieldMatch]:
                 type_boost["message"] = type_boost.get("message", 0) + 2.0
 
             for field_type in FIELD_KEYWORDS:
-                sc = _score_field(signals, field_type) + type_boost.get(field_type, 0)
+                sc = (
+                    _score_field(signals, field_type)
+                    + type_boost.get(field_type, 0)
+                    + boost_signals(platform_name, signals, field_type)
+                )
                 if sc > 0:
                     if required:
                         sc += 0.3
