@@ -2,9 +2,9 @@
 Fill contact forms with high coverage:
   1) dismiss popups / entry gates / reveal sections
   2) wait for JS forms
-  3) fill required (or all matched) fields — never newsletter boxes
-  4) fallback: email / textarea / name on real contact forms only
-  5) iframes included
+  3) detect Tier-1 platform (CF7, WPForms, Gravity, HubSpot, Elementor)
+  4) fill required (or all matched) fields — never newsletter boxes
+  5) fallback + iframes
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from playwright.async_api import Frame, Page
 
 from .form_analyzer import FieldMatch, find_fallback_fields, find_form_fields
+from .form_platforms import PlatformInfo, detect_platform
 
 
 @dataclass
@@ -89,7 +90,6 @@ async def dismiss_popups(page: Page) -> None:
 
 
 async def click_entry_gates(page: Page) -> None:
-    """Click splash / age-gate / Enter site buttons that block the real page."""
     texts = [
         "enter site", "enter the site", "enter website", "enter",
         "i am 18", "i am 18+", "i am over 18", "i am over 21", "i am 21",
@@ -293,9 +293,12 @@ async def _fill_on_target(
     profile: dict[str, str],
     message: str,
     use_human_type: bool = True,
+    platform: PlatformInfo | None = None,
 ) -> FillResult:
     values = _value_map(profile, message)
-    fields = await find_form_fields(target)
+    if platform is None:
+        platform = await detect_platform(target)
+    fields = await find_form_fields(target, platform=platform)
 
     if fields:
         required = {k: v for k, v in fields.items() if v.required}
@@ -326,19 +329,19 @@ async def _fill_on_target(
     checked = await tick_required_checkboxes(target)
     result.filled.extend(checked)
 
-    # Reject subscribe-only fills (email alone is not a contact form)
     types = {x.split("(")[0] for x in result.filled if x != "checkbox"}
     if types and types <= {"email", "email_confirm"}:
         result.filled = []
-        result.notes = "skipped_newsletter_like_form"
+        result.notes = f"form_type={platform.name} | skipped_newsletter_like_form"
         return result
 
+    plat = f"form_type={platform.name}"
     if result.filled:
-        result.notes = "filled=" + ",".join(result.filled) + (
+        result.notes = plat + " | filled=" + ",".join(result.filled) + (
             (" | " + result.notes) if result.notes else ""
         )
     else:
-        result.notes = result.notes or "could_not_fill_any_fields"
+        result.notes = plat + " | " + (result.notes or "could_not_fill_any_fields")
     if result.skipped:
         result.notes += " | skipped=" + ",".join(result.skipped[:12])
     if result.unknown_required:
@@ -369,7 +372,8 @@ async def fill_form(
 
     await dismiss_popups(page)
 
-    result = await _fill_on_target(page, profile, message)
+    platform = await detect_platform(page)
+    result = await _fill_on_target(page, profile, message, platform=platform)
     if result.ok:
         return result
 
@@ -387,7 +391,9 @@ async def fill_form(
             ):
                 continue
             try:
-                fr = await _fill_on_target(frame, profile, message)
+                frame_platform = await detect_platform(frame)
+                use_plat = frame_platform if frame_platform.name != "generic" else platform
+                fr = await _fill_on_target(frame, profile, message, platform=use_plat)
                 if fr.ok:
                     fr.notes = "iframe:" + fr.notes
                     return fr
@@ -400,15 +406,21 @@ async def fill_form(
 
 
 async def submit_form(page: Page) -> tuple[bool, str]:
-    selectors = [
-        "form button[type='submit']", "form input[type='submit']",
-        "button[type='submit']", "input[type='submit']",
-        "button:has-text('Submit')", "button:has-text('Send')",
-        "button:has-text('Send message')", "button:has-text('Send Message')",
-        "button:has-text('Contact us')", "button:has-text('Get in touch')",
-        "button:has-text('Enquire')", "button:has-text('Inquire')",
-        "input[value='Submit']", "input[value='Send']", "[type='submit']",
+    platform = await detect_platform(page)
+    selectors = list(platform.submit_selectors) + [
+        "button:has-text('Submit')",
+        "button:has-text('Send')",
+        "button:has-text('Send message')",
+        "button:has-text('Send Message')",
+        "button:has-text('Contact us')",
+        "button:has-text('Get in touch')",
+        "button:has-text('Enquire')",
+        "button:has-text('Inquire')",
+        "input[value='Submit']",
+        "input[value='Send']",
     ]
+    seen: set[str] = set()
+    selectors = [s for s in selectors if not (s in seen or seen.add(s))]
 
     async def try_target(target: Page | Frame) -> tuple[bool, str]:
         for sel in selectors:
